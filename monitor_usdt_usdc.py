@@ -408,17 +408,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    w3s = connect_providers()
-    db_path = args.db_path
-    usd_amount = Decimal(str(args.usd_amount))
-    lookback_seconds = int(args.lookback_seconds)
-    tilt_threshold = Decimal(str(args.tilt_threshold))
-    alert_cooldown_seconds = int(args.alert_cooldown_seconds)
-
     slack_url = args.slack_webhook_url.strip() or None
     tg_token = args.telegram_bot_token.strip() or None
     tg_chat_id = args.telegram_chat_id.strip() or None
-
     if args.telegram_test:
         if not tg_token or not tg_chat_id:
             raise SystemExit("Telegram test requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (or CLI args).")
@@ -426,6 +418,13 @@ def main() -> int:
         send_telegram(tg_token, tg_chat_id, test_msg)
         print("Telegram test message sent.")
         return 0
+
+    w3s = connect_providers()
+    db_path = args.db_path
+    usd_amount = Decimal(str(args.usd_amount))
+    lookback_seconds = int(args.lookback_seconds)
+    tilt_threshold = Decimal(str(args.tilt_threshold))
+    alert_cooldown_seconds = int(args.alert_cooldown_seconds)
 
     def do_once() -> None:
         try:
