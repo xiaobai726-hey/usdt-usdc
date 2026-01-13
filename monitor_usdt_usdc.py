@@ -394,6 +394,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--db-path", default="state.sqlite3", help="SQLite DB path for recording ratios")
     p.add_argument("--interval-seconds", type=int, default=300, help="Sampling interval (default: 300s)")
     p.add_argument("--once", action="store_true", help="Run once and exit")
+    p.add_argument("--telegram-test", action="store_true", help="Send a Telegram test message and exit")
     p.add_argument("--usd-amount", default="1000000", help="Simulated swap size in USDC (default: 1000000)")
     p.add_argument("--lookback-seconds", type=int, default=3600, help="Lookback window (default: 3600s)")
     p.add_argument("--tilt-threshold", default="0.05", help="Alert if USDT share increases by this fraction (default: 0.05)")
@@ -417,6 +418,14 @@ def main() -> int:
     slack_url = args.slack_webhook_url.strip() or None
     tg_token = args.telegram_bot_token.strip() or None
     tg_chat_id = args.telegram_chat_id.strip() or None
+
+    if args.telegram_test:
+        if not tg_token or not tg_chat_id:
+            raise SystemExit("Telegram test requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (or CLI args).")
+        test_msg = "🚀 USDT/USDC 监控系统已上线，当前溢价：10bps"
+        send_telegram(tg_token, tg_chat_id, test_msg)
+        print("Telegram test message sent.")
+        return 0
 
     def do_once() -> None:
         try:

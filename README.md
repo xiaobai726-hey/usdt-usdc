@@ -34,3 +34,10 @@ ETH_RPC_URL="https://..." BASE_RPC_URL="https://..." python3 monitor_usdt_usdc.p
 ETH_RPC_URL="https://..." BASE_RPC_URL="https://..." SLACK_WEBHOOK_URL="https://..." python3 monitor_usdt_usdc.py
 ```
 
+发送 Telegram 测试消息（不跑监控逻辑）：
+
+```bash
+ETH_RPC_URL="https://..." BASE_RPC_URL="https://..." TELEGRAM_BOT_TOKEN="123:AA..." TELEGRAM_CHAT_ID="1473275053" \
+  python3 monitor_usdt_usdc.py --telegram-test
+```
+
