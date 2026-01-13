@@ -240,12 +240,21 @@ class Web3Providers:
         self.eth = Web3(Web3.HTTPProvider(eth_rpc_url, request_kwargs={"timeout": 20}))
         if not self.eth.is_connected():
             raise SystemExit("Failed to connect to ETH_RPC_URL")
+        # More strict: ensure basic RPC methods work
+        try:
+            self.eth_chain_id = int(self.eth.eth.chain_id)
+        except Exception as e:
+            raise SystemExit(f"ETH_RPC_URL connected but eth_chainId failed: {e}") from e
 
         self.base: Web3 | None = None
         if base_rpc_url:
             w3 = Web3(Web3.HTTPProvider(base_rpc_url, request_kwargs={"timeout": 20}))
             if not w3.is_connected():
                 raise SystemExit("Failed to connect to BASE_RPC_URL")
+            try:
+                self.base_chain_id = int(w3.eth.chain_id)
+            except Exception as e:
+                raise SystemExit(f"BASE_RPC_URL connected but eth_chainId failed: {e}") from e
             self.base = w3
 
         self.bsc: Web3 | None = None
@@ -253,6 +262,10 @@ class Web3Providers:
             w3 = Web3(Web3.HTTPProvider(bsc_rpc_url, request_kwargs={"timeout": 20}))
             if not w3.is_connected():
                 raise SystemExit("Failed to connect to BSC_RPC_URL")
+            try:
+                self.bsc_chain_id = int(w3.eth.chain_id)
+            except Exception as e:
+                raise SystemExit(f"BSC_RPC_URL connected but eth_chainId failed: {e}") from e
             self.bsc = w3
 
         self.arb: Web3 | None = None
@@ -260,6 +273,10 @@ class Web3Providers:
             w3 = Web3(Web3.HTTPProvider(arb_rpc_url, request_kwargs={"timeout": 20}))
             if not w3.is_connected():
                 raise SystemExit("Failed to connect to ARB_RPC_URL")
+            try:
+                self.arb_chain_id = int(w3.eth.chain_id)
+            except Exception as e:
+                raise SystemExit(f"ARB_RPC_URL connected but eth_chainId failed: {e}") from e
             self.arb = w3
 
 
@@ -357,39 +374,68 @@ class AerodromeStablePoolMonitor(PoolMonitor):
         self.pair = self.w3.eth.contract(address=AERODROME_USDC_USDT_POOL, abi=PAIR_ABI)
 
     def fetch(self) -> PricePoint:
-        token0 = Web3.to_checksum_address(self.pair.functions.token0().call())
-        token1 = Web3.to_checksum_address(self.pair.functions.token1().call())
+        step = "get_code"
+        try:
+            code = self.w3.eth.get_code(AERODROME_USDC_USDT_POOL)
+        except Exception as e:
+            raise RuntimeError(f"aerodrome fetch failed at {step}: {e}") from e
+        if not code or code == b"":
+            raise RuntimeError("aerodrome fetch failed: no contract code at address (check Base RPC / network)")
+
+        step = "token0/token1"
+        try:
+            token0 = Web3.to_checksum_address(self.pair.functions.token0().call())
+            token1 = Web3.to_checksum_address(self.pair.functions.token1().call())
+        except Exception as e:
+            raise RuntimeError(f"aerodrome fetch failed at {step}: {e}") from e
 
         # Aerodrome pools are usually UniswapV2-like, but keep a fallback.
+        step = "getReserves"
         try:
             r0, r1, _ = self.pair.functions.getReserves().call()
         except Exception:
-            # best-effort fallback: balances(0/1)
-            r0 = int(self.pair.functions.balances(0).call())
-            r1 = int(self.pair.functions.balances(1).call())
+            step = "balances(0/1)"
+            try:
+                r0 = int(self.pair.functions.balances(0).call())
+                r1 = int(self.pair.functions.balances(1).call())
+            except Exception as e:
+                raise RuntimeError(f"aerodrome fetch failed at {step}: {e}") from e
 
-        # Use token decimals/symbols to map into USD per USDT
-        t0 = self.w3.eth.contract(address=token0, abi=ERC20_ABI)
-        t1 = self.w3.eth.contract(address=token1, abi=ERC20_ABI)
-        dec0 = int(t0.functions.decimals().call())
-        dec1 = int(t1.functions.decimals().call())
-        sym0 = str(t0.functions.symbol().call())
-        sym1 = str(t1.functions.symbol().call())
-
-        amt0 = _from_units(int(r0), dec0)
-        amt1 = _from_units(int(r1), dec1)
-
-        c0 = _classify_stable(sym0)
-        c1 = _classify_stable(sym1)
-        if c0 == "USDT" and c1 == "USD":
-            price = (amt1 / amt0) if amt0 != 0 else Decimal("0")  # USD per 1 USDT
-            usdt_amt, usd_amt = amt0, amt1
-        elif c0 == "USD" and c1 == "USDT":
-            price = (amt0 / amt1) if amt1 != 0 else Decimal("0")
-            usdt_amt, usd_amt = amt1, amt0
+        # Prefer address mapping to avoid token symbol edge-cases.
+        if token0 == BASE_USDC and token1 == BASE_USDT:
+            usd_amt = _from_units(int(r0), STABLE_DECIMALS)
+            usdt_amt = _from_units(int(r1), STABLE_DECIMALS)
+            sym0, sym1 = "USDC", "USDT"
+        elif token0 == BASE_USDT and token1 == BASE_USDC:
+            usdt_amt = _from_units(int(r0), STABLE_DECIMALS)
+            usd_amt = _from_units(int(r1), STABLE_DECIMALS)
+            sym0, sym1 = "USDT", "USDC"
         else:
-            raise RuntimeError(f"unexpected tokens: {sym0}/{sym1}")
+            # Fallback: Use token decimals/symbols to map into USD per USDT.
+            step = "token metadata"
+            try:
+                t0 = self.w3.eth.contract(address=token0, abi=ERC20_ABI)
+                t1 = self.w3.eth.contract(address=token1, abi=ERC20_ABI)
+                dec0 = int(t0.functions.decimals().call())
+                dec1 = int(t1.functions.decimals().call())
+                sym0 = str(t0.functions.symbol().call())
+                sym1 = str(t1.functions.symbol().call())
+            except Exception as e:
+                raise RuntimeError(f"aerodrome fetch failed at {step}: {e}") from e
 
+            amt0 = _from_units(int(r0), dec0)
+            amt1 = _from_units(int(r1), dec1)
+
+            c0 = _classify_stable(sym0)
+            c1 = _classify_stable(sym1)
+            if c0 == "USDT" and c1 == "USD":
+                usdt_amt, usd_amt = amt0, amt1
+            elif c0 == "USD" and c1 == "USDT":
+                usdt_amt, usd_amt = amt1, amt0
+            else:
+                raise RuntimeError(f"unexpected tokens: {sym0}/{sym1}")
+
+        price = (usd_amt / usdt_amt) if usdt_amt != 0 else Decimal("0")  # USDC per 1 USDT
         total = usd_amt + usdt_amt
         usdt_ratio = (usdt_amt / total) if total != 0 else Decimal("0")
 
@@ -628,6 +674,10 @@ def main() -> int:
     print(f"  univ3_eth={UNIV3_ETH_USDC_USDT_POOL}")
     print(f"  aerodrome={AERODROME_USDC_USDT_POOL} (base={'on' if providers.base else 'off'})")
     print(f"  bsc=({'on' if providers.bsc else 'off'}) arb=({'on' if providers.arb else 'off'})")
+    # Helpful for diagnosing RPC misconfiguration
+    print(f"  eth_chain_id={getattr(providers, 'eth_chain_id', 'unknown')}")
+    if providers.base is not None:
+        print(f"  base_chain_id={getattr(providers, 'base_chain_id', 'unknown')}")
 
     while True:
         try:
