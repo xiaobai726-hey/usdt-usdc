@@ -10,6 +10,9 @@
 
 - `ETH_RPC_URL`: 以太坊主网 HTTP RPC
 - `BASE_RPC_URL`: Base 链 HTTP RPC
+- `SLACK_WEBHOOK_URL`（可选）: Slack Incoming Webhook
+- `TELEGRAM_BOT_TOKEN`（可选）: Telegram Bot Token
+- `TELEGRAM_CHAT_ID`（可选）: Telegram Chat ID
 
 ## 运行
 
@@ -19,9 +22,15 @@
 pip3 install -r requirements.txt
 ```
 
-运行：
+单次运行：
 
 ```bash
-ETH_RPC_URL="https://..." BASE_RPC_URL="https://..." python3 monitor_usdt_usdc.py
+ETH_RPC_URL="https://..." BASE_RPC_URL="https://..." python3 monitor_usdt_usdc.py --once
+```
+
+常驻监控（默认每 5 分钟采样一次）：
+
+```bash
+ETH_RPC_URL="https://..." BASE_RPC_URL="https://..." SLACK_WEBHOOK_URL="https://..." python3 monitor_usdt_usdc.py
 ```
 
