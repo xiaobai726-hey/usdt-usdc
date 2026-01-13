@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.python-version
+.env
+
+# local state
+*.db
+*.sqlite
+*.sqlite3
+state.json
+state.jsonl
