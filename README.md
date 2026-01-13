@@ -4,6 +4,7 @@
 
 - 连接以太坊主网与 Base 链的 RPC Provider
 - 读取以太坊主网上 Curve 3pool 的 USDT/USDC 余额与比例
+- 通过 ccxt 获取 Binance/Coinbase 的 USDT/USDC 买一卖一，并对比 Curve 模拟 100 万 USDC 兑换价格，计算 Basis
 
 ## 环境变量
 
