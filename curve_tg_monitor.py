@@ -23,6 +23,7 @@ import time
 from decimal import Decimal
 from typing import Any
 
+import ccxt
 import requests
 from dotenv import load_dotenv
 from web3 import Web3
@@ -31,7 +32,7 @@ from web3 import Web3
 # --- Addresses ---
 # Ethereum mainnet
 CURVE_3POOL_SWAP = Web3.to_checksum_address("0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7")
-UNIV3_USDC_USDT_POOL = Web3.to_checksum_address("0x7858E59e0C01EA06Df3aF3D20aC7B0003275D4bF")
+UNIV3_ETH_USDC_USDT_POOL = Web3.to_checksum_address("0x7858E59e0C01EA06Df3aF3D20aC7B0003275D4bF")
 ETH_USDC = Web3.to_checksum_address("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
 ETH_USDT = Web3.to_checksum_address("0xdAC17F958D2ee523a2206206994597C13D831ec7")
 
@@ -39,6 +40,12 @@ ETH_USDT = Web3.to_checksum_address("0xdAC17F958D2ee523a2206206994597C13D831ec7"
 AERODROME_USDC_USDT_POOL = Web3.to_checksum_address("0x6cD36619DAf209e5730815E2811F4501D92c026b")
 BASE_USDC = Web3.to_checksum_address("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
 BASE_USDT = Web3.to_checksum_address("0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2")
+
+# Arbitrum
+UNIV3_ARB_USDC_USDT_POOL = Web3.to_checksum_address("0xBe38796f97089E4e24Fb598fde52797486572C7C")
+
+# BSC
+PANCAKESWAP_STABLE_POOL = Web3.to_checksum_address("0x7EFaEf62fDdCC041262846995661603953569584")
 
 USDC_INDEX = 1  # Curve 3pool: 0=DAI,1=USDC,2=USDT
 USDT_INDEX = 2
@@ -143,6 +150,20 @@ ERC20_ABI: list[dict[str, Any]] = [
         "stateMutability": "view",
         "type": "function",
     },
+    {
+        "name": "symbol",
+        "outputs": [{"type": "string", "name": ""}],
+        "inputs": [],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "name": "balanceOf",
+        "outputs": [{"type": "uint256", "name": ""}],
+        "inputs": [{"type": "address", "name": "account"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
 ]
 
 
@@ -159,6 +180,30 @@ def _from_units(amount: int, decimals: int) -> Decimal:
 
 def _utc_ts() -> str:
     return dt.datetime.now(tz=dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def _norm_symbol(sym: str) -> str:
+    return sym.strip().upper()
+
+
+def _classify_stable(sym: str) -> str | None:
+    """
+    Classify token symbol into buckets we can compare.
+    We compare everything as USD-per-USDT (USDC per 1 USDT).
+    """
+    s = _norm_symbol(sym)
+    if s == "USDT":
+        return "USDT"
+    # treat common USD stables as "USD"
+    if s.startswith("USDC") or s in {"USDBC", "BUSD", "DAI", "USD+"}:
+        return "USD"
+    return None
+
+
+def _bps_between(cheap: Decimal, expensive: Decimal) -> Decimal:
+    if cheap == 0:
+        return Decimal("0")
+    return ((expensive - cheap) / cheap) * Decimal(10000)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -181,7 +226,13 @@ class TelegramNotifier:
 
 
 class Web3Providers:
-    def __init__(self, eth_rpc_url: str, base_rpc_url: str | None, bsc_rpc_url: str | None):
+    def __init__(
+        self,
+        eth_rpc_url: str,
+        base_rpc_url: str | None,
+        bsc_rpc_url: str | None,
+        arb_rpc_url: str | None,
+    ):
         self.eth = Web3(Web3.HTTPProvider(eth_rpc_url, request_kwargs={"timeout": 20}))
         if not self.eth.is_connected():
             raise SystemExit("Failed to connect to ETH_RPC_URL")
@@ -200,6 +251,13 @@ class Web3Providers:
                 raise SystemExit("Failed to connect to BSC_RPC_URL")
             self.bsc = w3
 
+        self.arb: Web3 | None = None
+        if arb_rpc_url:
+            w3 = Web3(Web3.HTTPProvider(arb_rpc_url, request_kwargs={"timeout": 20}))
+            if not w3.is_connected():
+                raise SystemExit("Failed to connect to ARB_RPC_URL")
+            self.arb = w3
+
 
 class PoolMonitor:
     name: str
@@ -207,6 +265,45 @@ class PoolMonitor:
 
     def fetch(self) -> PricePoint:
         raise NotImplementedError
+
+
+class CexTopOfBookMonitor(PoolMonitor):
+    chain = "cex"
+
+    def __init__(self, exchange_id: str):
+        self.name = exchange_id
+        self._exchange_id = exchange_id
+
+    def fetch(self) -> PricePoint:
+        ex_class = getattr(ccxt, self._exchange_id)
+        ex = ex_class({"enableRateLimit": True})
+        try:
+            ex.load_markets()
+            symbol = "USDT/USDC" if "USDT/USDC" in ex.symbols else "USDC/USDT"
+            ob = ex.fetch_order_book(symbol, limit=5)
+            bid = ob["bids"][0][0] if ob.get("bids") else None
+            ask = ob["asks"][0][0] if ob.get("asks") else None
+            if bid is None or ask is None:
+                raise RuntimeError("empty orderbook")
+            bid_d = Decimal(str(bid))
+            ask_d = Decimal(str(ask))
+            mid = (bid_d + ask_d) / Decimal(2)
+
+            # Normalize to USDC per 1 USDT
+            if symbol == "USDC/USDT":
+                mid = (Decimal(1) / mid) if mid != 0 else Decimal("0")
+
+            return PricePoint(
+                name=self.name,
+                chain=self.chain,
+                price_usdc_per_usdt=mid,
+                meta={"symbol": symbol, "bid": bid_d, "ask": ask_d},
+            )
+        finally:
+            try:
+                ex.close()
+            except Exception:
+                pass
 
 
 class Curve3PoolMonitor(PoolMonitor):
@@ -265,60 +362,132 @@ class AerodromeStablePoolMonitor(PoolMonitor):
             r0 = int(self.pair.functions.balances(0).call())
             r1 = int(self.pair.functions.balances(1).call())
 
-        # Map reserves to USDC/USDT (both assumed 6 decimals on Base)
-        if token0 == BASE_USDC and token1 == BASE_USDT:
-            usdc = _from_units(int(r0), STABLE_DECIMALS)
-            usdt = _from_units(int(r1), STABLE_DECIMALS)
-        elif token0 == BASE_USDT and token1 == BASE_USDC:
-            usdt = _from_units(int(r0), STABLE_DECIMALS)
-            usdc = _from_units(int(r1), STABLE_DECIMALS)
-        else:
-            # Fallback: treat token0 as USDC, token1 as USDT (best-effort)
-            usdc = _from_units(int(r0), STABLE_DECIMALS)
-            usdt = _from_units(int(r1), STABLE_DECIMALS)
+        # Use token decimals/symbols to map into USD per USDT
+        t0 = self.w3.eth.contract(address=token0, abi=ERC20_ABI)
+        t1 = self.w3.eth.contract(address=token1, abi=ERC20_ABI)
+        dec0 = int(t0.functions.decimals().call())
+        dec1 = int(t1.functions.decimals().call())
+        sym0 = str(t0.functions.symbol().call())
+        sym1 = str(t1.functions.symbol().call())
 
-        total = usdc + usdt
-        usdt_ratio = (usdt / total) if total != 0 else Decimal("0")
-        price = (usdc / usdt) if usdt != 0 else Decimal("0")  # indicative: USDC per 1 USDT
+        amt0 = _from_units(int(r0), dec0)
+        amt1 = _from_units(int(r1), dec1)
+
+        c0 = _classify_stable(sym0)
+        c1 = _classify_stable(sym1)
+        if c0 == "USDT" and c1 == "USD":
+            price = (amt1 / amt0) if amt0 != 0 else Decimal("0")  # USD per 1 USDT
+            usdt_amt, usd_amt = amt0, amt1
+        elif c0 == "USD" and c1 == "USDT":
+            price = (amt0 / amt1) if amt1 != 0 else Decimal("0")
+            usdt_amt, usd_amt = amt1, amt0
+        else:
+            raise RuntimeError(f"unexpected tokens: {sym0}/{sym1}")
+
+        total = usd_amt + usdt_amt
+        usdt_ratio = (usdt_amt / total) if total != 0 else Decimal("0")
 
         return PricePoint(
             name=self.name,
             chain=self.chain,
             price_usdc_per_usdt=price,
             meta={
-                "usdc": usdc,
-                "usdt": usdt,
+                "usd": usd_amt,
+                "usdt": usdt_amt,
                 "usdt_ratio": usdt_ratio,
                 "token0": token0,
                 "token1": token1,
+                "symbol0": sym0,
+                "symbol1": sym1,
             },
         )
 
 
-class UniswapV3PoolMonitor(PoolMonitor):
-    name = "uniswapv3-usdc-usdt"
-    chain = "ethereum"
+class PancakeSwapV2StablePoolMonitor(PoolMonitor):
+    name = "pancakeswap-stable"
+    chain = "bsc"
 
     def __init__(self, w3: Web3):
         self.w3 = w3
-        self.pool = self.w3.eth.contract(address=UNIV3_USDC_USDT_POOL, abi=UNIV3_POOL_ABI)
+        self.pair = self.w3.eth.contract(address=PANCAKESWAP_STABLE_POOL, abi=PAIR_ABI)
+
+    def fetch(self) -> PricePoint:
+        token0 = Web3.to_checksum_address(self.pair.functions.token0().call())
+        token1 = Web3.to_checksum_address(self.pair.functions.token1().call())
+        r0, r1, _ = self.pair.functions.getReserves().call()
+
+        t0 = self.w3.eth.contract(address=token0, abi=ERC20_ABI)
+        t1 = self.w3.eth.contract(address=token1, abi=ERC20_ABI)
+        dec0 = int(t0.functions.decimals().call())
+        dec1 = int(t1.functions.decimals().call())
+        sym0 = str(t0.functions.symbol().call())
+        sym1 = str(t1.functions.symbol().call())
+
+        amt0 = _from_units(int(r0), dec0)
+        amt1 = _from_units(int(r1), dec1)
+
+        c0 = _classify_stable(sym0)
+        c1 = _classify_stable(sym1)
+        if c0 == "USDT" and c1 == "USD":
+            price = (amt1 / amt0) if amt0 != 0 else Decimal("0")
+        elif c0 == "USD" and c1 == "USDT":
+            price = (amt0 / amt1) if amt1 != 0 else Decimal("0")
+        else:
+            raise RuntimeError(f"unexpected tokens: {sym0}/{sym1}")
+
+        return PricePoint(
+            name=self.name,
+            chain=self.chain,
+            price_usdc_per_usdt=price,
+            meta={"token0": token0, "token1": token1, "symbol0": sym0, "symbol1": sym1},
+        )
+
+
+class UniswapV3StablePoolMonitor(PoolMonitor):
+    def __init__(self, *, w3: Web3, pool_address: str, chain: str, name: str):
+        self.chain = chain
+        self.name = name
+        self.w3 = w3
+        self.pool_address = Web3.to_checksum_address(pool_address)
+        self.pool = self.w3.eth.contract(address=self.pool_address, abi=UNIV3_POOL_ABI)
         self._token0: str | None = None
         self._token1: str | None = None
         self._dec0: int | None = None
         self._dec1: int | None = None
+        self._sym0: str | None = None
+        self._sym1: str | None = None
 
     def _load_tokens(self) -> None:
-        if self._token0 and self._token1 and self._dec0 is not None and self._dec1 is not None:
+        if (
+            self._token0
+            and self._token1
+            and self._dec0 is not None
+            and self._dec1 is not None
+            and self._sym0 is not None
+            and self._sym1 is not None
+        ):
             return
         t0 = Web3.to_checksum_address(self.pool.functions.token0().call())
         t1 = Web3.to_checksum_address(self.pool.functions.token1().call())
-        d0 = int(self.w3.eth.contract(address=t0, abi=ERC20_ABI).functions.decimals().call())
-        d1 = int(self.w3.eth.contract(address=t1, abi=ERC20_ABI).functions.decimals().call())
-        self._token0, self._token1, self._dec0, self._dec1 = t0, t1, d0, d1
+        c0 = self.w3.eth.contract(address=t0, abi=ERC20_ABI)
+        c1 = self.w3.eth.contract(address=t1, abi=ERC20_ABI)
+        d0 = int(c0.functions.decimals().call())
+        d1 = int(c1.functions.decimals().call())
+        s0 = str(c0.functions.symbol().call())
+        s1 = str(c1.functions.symbol().call())
+        self._token0, self._token1, self._dec0, self._dec1, self._sym0, self._sym1 = t0, t1, d0, d1, s0, s1
 
     def fetch(self) -> PricePoint:
         self._load_tokens()
-        assert self._token0 and self._token1 and self._dec0 is not None and self._dec1 is not None
+        assert (
+            self._token0
+            and self._token1
+            and self._dec0 is not None
+            and self._dec1 is not None
+            and self._sym0 is not None
+            and self._sym1 is not None
+        )
+
         sqrt_price_x96 = int(self.pool.functions.slot0().call()[0])
 
         # Uniswap V3: price token1 per token0 = (sqrtP^2 / 2^192) * 10^(dec0-dec1)
@@ -326,16 +495,30 @@ class UniswapV3PoolMonitor(PoolMonitor):
         denom = Decimal(2) ** 192
         price_1_per_0 = (numerator / denom) * (Decimal(10) ** Decimal(self._dec0 - self._dec1))
 
-        # Normalize to USDC per 1 USDT
-        if self._token0 == ETH_USDC and self._token1 == ETH_USDT:
-            # token1/token0 = USDT per USDC => invert for USDC per USDT
-            price_usdc_per_usdt = (Decimal(1) / price_1_per_0) if price_1_per_0 != 0 else Decimal("0")
-        elif self._token0 == ETH_USDT and self._token1 == ETH_USDC:
-            # token1/token0 = USDC per USDT
+        c0 = _classify_stable(self._sym0)
+        c1 = _classify_stable(self._sym1)
+        if c0 == "USDT" and c1 == "USD":
             price_usdc_per_usdt = price_1_per_0
-        else:
-            # Best-effort: assume token1 is USDT and token0 is USDC and invert like above
+        elif c0 == "USD" and c1 == "USDT":
             price_usdc_per_usdt = (Decimal(1) / price_1_per_0) if price_1_per_0 != 0 else Decimal("0")
+        else:
+            raise RuntimeError(f"unexpected tokens: {self._sym0}/{self._sym1}")
+
+        # "Reserves" approximation: actual token balances held by the pool contract.
+        c0_contract = self.w3.eth.contract(address=self._token0, abi=ERC20_ABI)
+        c1_contract = self.w3.eth.contract(address=self._token1, abi=ERC20_ABI)
+        bal0_raw = int(c0_contract.functions.balanceOf(self.pool_address).call())
+        bal1_raw = int(c1_contract.functions.balanceOf(self.pool_address).call())
+        bal0 = _from_units(bal0_raw, int(self._dec0))
+        bal1 = _from_units(bal1_raw, int(self._dec1))
+
+        if c0 == "USDT" and c1 == "USD":
+            usdt_amt, usd_amt = bal0, bal1
+        else:
+            # c0 == USD and c1 == USDT
+            usd_amt, usdt_amt = bal0, bal1
+        total = usd_amt + usdt_amt
+        usdt_ratio = (usdt_amt / total) if total != 0 else Decimal("0")
 
         return PricePoint(
             name=self.name,
@@ -345,8 +528,13 @@ class UniswapV3PoolMonitor(PoolMonitor):
                 "sqrtPriceX96": sqrt_price_x96,
                 "token0": self._token0,
                 "token1": self._token1,
+                "symbol0": self._sym0,
+                "symbol1": self._sym1,
                 "decimals0": self._dec0,
                 "decimals1": self._dec1,
+                "usd": usd_amt,
+                "usdt": usdt_amt,
+                "usdt_ratio": usdt_ratio,
             },
         )
 
@@ -359,20 +547,15 @@ class ArbitrageDetector:
         self._last_sent_ts: float = 0.0
         self.cooldown_seconds = 300  # avoid spam
 
-    @staticmethod
-    def _spread_bps(min_p: Decimal, max_p: Decimal) -> Decimal:
-        if min_p == 0:
-            return Decimal("0")
-        return ((max_p - min_p) / min_p) * Decimal(10000)
-
     def evaluate_and_alert(self, points: list[PricePoint]) -> None:
+        points = [p for p in points if p.price_usdc_per_usdt is not None and p.price_usdc_per_usdt > 0]
         if len(points) < 2:
             return
         points_sorted = sorted(points, key=lambda p: p.price_usdc_per_usdt)
         cheap = points_sorted[0]
         expensive = points_sorted[-1]
 
-        spread_bps = self._spread_bps(cheap.price_usdc_per_usdt, expensive.price_usdc_per_usdt)
+        spread_bps = _bps_between(cheap.price_usdc_per_usdt, expensive.price_usdc_per_usdt)
         if spread_bps < self.bps_threshold:
             self._last_key = None
             return
@@ -410,30 +593,35 @@ def main() -> int:
     eth_rpc = _require("ETH_RPC_URL")
     base_rpc = os.getenv("BASE_RPC_URL", "").strip() or None
     bsc_rpc = os.getenv("BSC_RPC_URL", "").strip() or None
+    arb_rpc = os.getenv("ARB_RPC_URL", "").strip() or None
     tg_token = _require("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("CHAT_ID", "").strip() or _require("TELEGRAM_CHAT_ID")
 
-    providers = Web3Providers(eth_rpc_url=eth_rpc, base_rpc_url=base_rpc, bsc_rpc_url=bsc_rpc)
+    providers = Web3Providers(eth_rpc_url=eth_rpc, base_rpc_url=base_rpc, bsc_rpc_url=bsc_rpc, arb_rpc_url=arb_rpc)
     notifier = TelegramNotifier(bot_token=tg_token, chat_id=chat_id)
     detector = ArbitrageDetector(notifier=notifier, bps_threshold=Decimal(str(args.bps_threshold)))
 
     monitors: list[PoolMonitor] = [
         Curve3PoolMonitor(providers.eth),
-        UniswapV3PoolMonitor(providers.eth),
+        UniswapV3StablePoolMonitor(
+            w3=providers.eth,
+            pool_address=str(UNIV3_ETH_USDC_USDT_POOL),
+            chain="ethereum",
+            name="uniswapv3-eth-usdc-usdt",
+        ),
     ]
     if providers.base is not None:
         monitors.append(AerodromeStablePoolMonitor(providers.base))
     else:
         print("BASE_RPC_URL not set; skipping Aerodrome(Base) monitor.", file=sys.stderr)
-    if providers.bsc is None:
-        print("BSC_RPC_URL not set; skipping BSC monitors.", file=sys.stderr)
+    # For now, keep other chains/providers optional but not enabled by default.
 
     print("Starting multi-pool monitor (loop=60s)...")
     print(f"  tg_chat_id={chat_id}")
     print(f"  curve={CURVE_3POOL_SWAP}")
-    print(f"  univ3={UNIV3_USDC_USDT_POOL}")
+    print(f"  univ3_eth={UNIV3_ETH_USDC_USDT_POOL}")
     print(f"  aerodrome={AERODROME_USDC_USDT_POOL} (base={'on' if providers.base else 'off'})")
-    print(f"  bsc=({'on' if providers.bsc else 'off'})")
+    print(f"  bsc=({'on' if providers.bsc else 'off'}) arb=({'on' if providers.arb else 'off'})")
 
     while True:
         try:
