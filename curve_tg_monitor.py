@@ -23,10 +23,14 @@ import time
 from decimal import Decimal
 from typing import Any
 
-import ccxt
 import requests
 from dotenv import load_dotenv
 from web3 import Web3
+
+try:
+    import ccxt  # optional (only needed when enabling CEX monitors)
+except Exception:  # pragma: no cover
+    ccxt = None
 
 
 # --- Addresses ---
@@ -271,6 +275,8 @@ class CexTopOfBookMonitor(PoolMonitor):
     chain = "cex"
 
     def __init__(self, exchange_id: str):
+        if ccxt is None:
+            raise RuntimeError("ccxt is not installed; install requirements.txt to enable CEX monitors")
         self.name = exchange_id
         self._exchange_id = exchange_id
 
