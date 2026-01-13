@@ -22,6 +22,20 @@
 pip3 install -r requirements.txt
 ```
 
+### Curve + Telegram（每 60 秒，触发阈值就报警）
+
+1) 复制 `.env.example` 为 `.env` 并填写：
+
+```bash
+cp .env.example .env
+```
+
+2) 运行：
+
+```bash
+python3 curve_tg_monitor.py
+```
+
 单次运行：
 
 ```bash
