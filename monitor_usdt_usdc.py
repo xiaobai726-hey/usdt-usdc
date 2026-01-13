@@ -152,12 +152,12 @@ def _safe_decimal(x: Any) -> Decimal:
     return Decimal(str(x))
 
 
-def fetch_cex_top_of_book() -> dict[str, dict[str, Decimal | None]]:
+def fetch_cex_top_of_book(exchanges: list[str]) -> dict[str, dict[str, Any]]:
     """
     Fetch top-of-book for USDT/USDC on Binance + Coinbase.
 
     Returns:
-      {exchange: {bid, ask, mid}} in "USDC per 1 USDT".
+      {exchange: {bid, ask, mid, error}} in "USDC per 1 USDT".
     """
 
     def get_quote(exchange_id: str) -> dict[str, Decimal | None]:
@@ -190,10 +190,14 @@ def fetch_cex_top_of_book() -> dict[str, dict[str, Decimal | None]]:
             except Exception:
                 pass
 
-    return {
-        "binance": get_quote("binance"),
-        "coinbase": get_quote("coinbase"),
-    }
+    out: dict[str, dict[str, Any]] = {}
+    for ex_id in exchanges:
+        try:
+            q = get_quote(ex_id)
+            out[ex_id] = {**q, "error": None}
+        except Exception as e:
+            out[ex_id] = {"bid": None, "ask": None, "mid": None, "error": str(e)}
+    return out
 
 
 def curve_simulate_swap_1m_usdc_to_usdt(w3_eth: Web3, usd_amount: Decimal) -> dict[str, Any]:
@@ -340,6 +344,7 @@ def run_once(
     slack_webhook_url: str | None,
     telegram_bot_token: str | None,
     telegram_chat_id: str | None,
+    exchanges: list[str],
 ) -> None:
     # Base is connected for multi-chain readiness; 3pool exists on Ethereum mainnet only.
     snapshot = read_curve_3pool_usdt_usdc(w3s["ethereum"])
@@ -368,15 +373,19 @@ def run_once(
     print(f"  USDT out: {sim['dy_usdt']}")
     print(f"  Effective price (USDC per 1 USDT): {curve_px_str}")
 
-    quotes = fetch_cex_top_of_book()
+    quotes = fetch_cex_top_of_book(exchanges)
     print()
     print("CEX top-of-book (USDC per 1 USDT):")
     for ex, q in quotes.items():
+        err = q.get("error")
         bid = q["bid"]
         ask = q["ask"]
         mid = q["mid"]
         if bid is None or ask is None or mid is None:
-            print(f"  {ex}: N/A")
+            if err:
+                print(f"  {ex}: N/A ({err})")
+            else:
+                print(f"  {ex}: N/A")
             continue
         bps = basis(curve_px, mid)
         bps_str = "N/A" if bps is None else f"{(bps * Decimal(100)).quantize(Decimal('0.0001'))}%"
@@ -412,6 +421,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--interval-seconds", type=int, default=300, help="Sampling interval (default: 300s)")
     p.add_argument("--once", action="store_true", help="Run once and exit")
     p.add_argument("--telegram-test", action="store_true", help="Send a Telegram test message and exit")
+    p.add_argument(
+        "--exchanges",
+        default="binance,coinbase",
+        help="Comma-separated ccxt exchange ids to query (default: binance,coinbase)",
+    )
     p.add_argument("--usd-amount", default="1000000", help="Simulated swap size in USDC (default: 1000000)")
     p.add_argument("--lookback-seconds", type=int, default=3600, help="Lookback window (default: 3600s)")
     p.add_argument("--tilt-threshold", default="0.05", help="Alert if USDT share increases by this fraction (default: 0.05)")
@@ -442,6 +456,7 @@ def main() -> int:
     lookback_seconds = int(args.lookback_seconds)
     tilt_threshold = Decimal(str(args.tilt_threshold))
     alert_cooldown_seconds = int(args.alert_cooldown_seconds)
+    exchanges = [x.strip() for x in str(args.exchanges).split(",") if x.strip()]
 
     def do_once() -> None:
         try:
@@ -455,6 +470,7 @@ def main() -> int:
                 slack_webhook_url=slack_url,
                 telegram_bot_token=tg_token,
                 telegram_chat_id=tg_chat_id,
+                exchanges=exchanges,
             )
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
