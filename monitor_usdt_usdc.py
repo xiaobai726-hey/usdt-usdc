@@ -84,14 +84,31 @@ def _require_env(name: str) -> str:
 
 
 def connect_providers() -> dict[str, Web3]:
-    """Create Web3 providers for configured chains."""
+    """
+    Create Web3 providers.
+
+    - ETH mainnet is required (ETH_RPC_URL)
+    - Base is optional (BASE_RPC_URL). If missing, it's skipped.
+    """
     w3s: dict[str, Web3] = {}
-    for c in CHAINS:
-        rpc_url = _require_env(c.rpc_env)
-        w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 20}))
-        if not w3.is_connected():
-            raise SystemExit(f"Failed to connect: {c.name} ({c.rpc_env})")
-        w3s[c.name] = w3
+
+    # Ethereum is mandatory
+    eth_url = _require_env("ETH_RPC_URL")
+    w3_eth = Web3(Web3.HTTPProvider(eth_url, request_kwargs={"timeout": 20}))
+    if not w3_eth.is_connected():
+        raise SystemExit("Failed to connect: ethereum (ETH_RPC_URL)")
+    w3s["ethereum"] = w3_eth
+
+    # Base is optional
+    base_url = os.getenv("BASE_RPC_URL", "").strip()
+    if base_url:
+        w3_base = Web3(Web3.HTTPProvider(base_url, request_kwargs={"timeout": 20}))
+        if not w3_base.is_connected():
+            raise SystemExit("Failed to connect: base (BASE_RPC_URL)")
+        w3s["base"] = w3_base
+    else:
+        print("BASE_RPC_URL not set; skipping Base provider.", file=sys.stderr)
+
     return w3s
 
 
