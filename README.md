@@ -41,3 +41,19 @@ ETH_RPC_URL="https://..." BASE_RPC_URL="https://..." TELEGRAM_BOT_TOKEN="123:AA.
   python3 monitor_usdt_usdc.py --telegram-test
 ```
 
+## 部署到 GitHub（GitHub Actions 定时运行）
+
+仓库已包含工作流：`.github/workflows/monitor.yml`，默认 **每 5 分钟**运行一次 `--once`。
+
+你需要在 GitHub 仓库里配置 Secrets（Settings → Secrets and variables → Actions）：
+
+- `ETH_RPC_URL`
+- `BASE_RPC_URL`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `SLACK_WEBHOOK_URL`（可选）
+
+说明：
+- GitHub Actions 的 cron 是 **best-effort**（可能延迟），但适合做“每几分钟跑一次”的监控。
+- 工作流会用 cache 尝试持久化 `state.sqlite3`，用于计算“最近 1 小时内”变化。
+
