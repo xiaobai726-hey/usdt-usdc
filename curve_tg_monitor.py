@@ -58,8 +58,9 @@ USDC_INDEX = 1  # Curve 3pool: 0=DAI,1=USDC,2=USDT
 USDT_INDEX = 2
 STABLE_DECIMALS = 6
 SIM_USDC_AMOUNT = Decimal("1000000")  # simulate 1,000,000 USDC -> USDT on Curve
-BPS_THRESHOLD = Decimal("3")  # 3 bps
+BPS_THRESHOLD = Decimal("3")  # 3 bps (arbitrage alert)
 DEFAULT_LOOP_SECONDS = 60
+DEFAULT_SUMMARY_SECONDS = 3600  # hourly summary push
 
 CURVE_SWAP_ABI: list[dict[str, Any]] = [
     {
@@ -660,11 +661,60 @@ class ArbitrageDetector:
         self._last_sent_ts = now
 
 
+class SummaryPublisher:
+    def __init__(self, notifier: TelegramNotifier, interval_seconds: int):
+        self.notifier = notifier
+        self.interval_seconds = max(60, int(interval_seconds))
+        self._last_sent_ts: float = 0.0
+
+    def maybe_send(self, points: list[PricePoint]) -> None:
+        now = time.time()
+        if self._last_sent_ts and (now - self._last_sent_ts) < self.interval_seconds:
+            return
+
+        # Expect Curve + Uniswap; send what we have.
+        by_name = {f"{p.chain}/{p.name}": p for p in points}
+        curve = by_name.get("ethereum/curve-3pool")
+        uni = by_name.get("ethereum/uniswapv3-eth-usdc-usdt")
+
+        lines = [f"📊 USDT/USDC 链上监控（每小时汇总）", f"time={_utc_ts()}"]
+        if curve:
+            ratio_pct = (Decimal(str(curve.meta.get("usdt_ratio", 0))) * Decimal(100)).quantize(Decimal("0.01"))
+            lines.append(
+                f"Curve: px={curve.price_usdc_per_usdt.quantize(Decimal('0.00000001'))} USDC/USDT | USDT_Ratio={ratio_pct}%"
+            )
+        else:
+            lines.append("Curve: N/A")
+
+        if uni:
+            ratio_pct = (Decimal(str(uni.meta.get("usdt_ratio", 0))) * Decimal(100)).quantize(Decimal("0.01"))
+            lines.append(
+                f"UniswapV3: px={uni.price_usdc_per_usdt.quantize(Decimal('0.00000001'))} USDC/USDT | USDT_Ratio={ratio_pct}%"
+            )
+        else:
+            lines.append("UniswapV3: N/A")
+
+        if curve and uni:
+            cheap = min(curve.price_usdc_per_usdt, uni.price_usdc_per_usdt)
+            expensive = max(curve.price_usdc_per_usdt, uni.price_usdc_per_usdt)
+            spread_bps = _bps_between(cheap, expensive).quantize(Decimal("0.1"))
+            lines.append(f"Spread(Curve vs UniV3)={spread_bps}bps")
+
+        self.notifier.send("\n".join(lines))
+        self._last_sent_ts = now
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Monitor Curve/Aerodrome/UniswapV3 USDT/USDC and alert on spreads.")
     p.add_argument("--once", action="store_true", help="Run one iteration and exit")
     p.add_argument("--interval-seconds", type=int, default=DEFAULT_LOOP_SECONDS, help="Loop interval seconds (default: 60)")
     p.add_argument("--bps-threshold", default=str(BPS_THRESHOLD), help="Alert threshold in bps (default: 3)")
+    p.add_argument(
+        "--summary-seconds",
+        type=int,
+        default=DEFAULT_SUMMARY_SECONDS,
+        help="Summary push interval seconds (default: 3600)",
+    )
     return p.parse_args()
 
 
@@ -683,6 +733,7 @@ def main() -> int:
     providers = Web3Providers(eth_rpc_url=eth_rpc, base_rpc_url=base_rpc, bsc_rpc_url=bsc_rpc, arb_rpc_url=arb_rpc)
     notifier = TelegramNotifier(bot_token=tg_token, chat_id=chat_id)
     detector = ArbitrageDetector(notifier=notifier, bps_threshold=Decimal(str(args.bps_threshold)))
+    summary = SummaryPublisher(notifier=notifier, interval_seconds=args.summary_seconds)
 
     monitors: list[PoolMonitor] = [
         Curve3PoolMonitor(providers.eth),
@@ -693,22 +744,15 @@ def main() -> int:
             name="uniswapv3-eth-usdc-usdt",
         ),
     ]
-    if providers.base is not None:
-        monitors.append(AerodromeStablePoolMonitor(providers.base))
-    else:
-        print("BASE_RPC_URL not set; skipping Aerodrome(Base) monitor.", file=sys.stderr)
-    # For now, keep other chains/providers optional but not enabled by default.
+    # Per request: disable Aerodrome/Base for now; keep only Curve + UniswapV3.
 
     print("Starting multi-pool monitor (loop=60s)...")
     print(f"  tg_chat_id={chat_id}")
     print(f"  curve={CURVE_3POOL_SWAP}")
     print(f"  univ3_eth={UNIV3_ETH_USDC_USDT_POOL}")
-    print(f"  aerodrome_factory={AERODROME_FACTORY} (base={'on' if providers.base else 'off'})")
     print(f"  bsc=({'on' if providers.bsc else 'off'}) arb=({'on' if providers.arb else 'off'})")
     # Helpful for diagnosing RPC misconfiguration
     print(f"  eth_chain_id={getattr(providers, 'eth_chain_id', 'unknown')}")
-    if providers.base is not None:
-        print(f"  base_chain_id={getattr(providers, 'base_chain_id', 'unknown')}")
 
     while True:
         try:
@@ -729,6 +773,7 @@ def main() -> int:
                 print(f"[{p.chain}/{p.name}] price(USDC/USDT)={px}{extra}")
 
             detector.evaluate_and_alert(points)
+            summary.maybe_send(points)
 
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
