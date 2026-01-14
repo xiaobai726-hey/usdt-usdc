@@ -41,7 +41,10 @@ ETH_USDC = Web3.to_checksum_address("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
 ETH_USDT = Web3.to_checksum_address("0xdAC17F958D2ee523a2206206994597C13D831ec7")
 
 # Base
-AERODROME_USDC_USDT_POOL = Web3.to_checksum_address("0x6cD36619DAf209e5730815E2811F4501D92c026b")
+#
+# NOTE: The Aerodrome USDC/USDT pool address is resolved at runtime via Factory.getPool().
+# (Some third-party lists may show non-contract addresses; always verify via eth_getCode.)
+AERODROME_FACTORY = Web3.to_checksum_address("0x420DD381B31Aef6683db6B902084cB0FFECe40Da")
 BASE_USDC = Web3.to_checksum_address("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
 BASE_USDT = Web3.to_checksum_address("0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2")
 
@@ -112,6 +115,20 @@ PAIR_ABI: list[dict[str, Any]] = [
         "stateMutability": "view",
         "type": "function",
     },
+]
+
+SOLIDLY_FACTORY_ABI: list[dict[str, Any]] = [
+    {
+        "name": "getPool",
+        "outputs": [{"type": "address", "name": "pool"}],
+        "inputs": [
+            {"type": "address", "name": "tokenA"},
+            {"type": "address", "name": "tokenB"},
+            {"type": "bool", "name": "stable"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    }
 ]
 
 UNIV3_POOL_ABI: list[dict[str, Any]] = [
@@ -371,16 +388,29 @@ class AerodromeStablePoolMonitor(PoolMonitor):
 
     def __init__(self, w3: Web3):
         self.w3 = w3
-        self.pair = self.w3.eth.contract(address=AERODROME_USDC_USDT_POOL, abi=PAIR_ABI)
+        self.factory = self.w3.eth.contract(address=AERODROME_FACTORY, abi=SOLIDLY_FACTORY_ABI)
+        self._pool: str | None = None
+
+    def _resolve_pool(self) -> str:
+        if self._pool:
+            return self._pool
+        pool = Web3.to_checksum_address(self.factory.functions.getPool(BASE_USDC, BASE_USDT, True).call())
+        if int(pool, 16) == 0:
+            raise RuntimeError("aerodrome factory getPool returned zero address for USDC/USDT stable")
+        self._pool = pool
+        return pool
 
     def fetch(self) -> PricePoint:
+        pool_addr = self._resolve_pool()
+        self.pair = self.w3.eth.contract(address=pool_addr, abi=PAIR_ABI)
+
         step = "get_code"
         try:
-            code = self.w3.eth.get_code(AERODROME_USDC_USDT_POOL)
+            code = self.w3.eth.get_code(pool_addr)
         except Exception as e:
             raise RuntimeError(f"aerodrome fetch failed at {step}: {e}") from e
         if not code or code == b"":
-            raise RuntimeError("aerodrome fetch failed: no contract code at address (check Base RPC / network)")
+            raise RuntimeError("aerodrome fetch failed: no contract code at resolved pool address")
 
         step = "token0/token1"
         try:
@@ -447,6 +477,7 @@ class AerodromeStablePoolMonitor(PoolMonitor):
                 "usd": usd_amt,
                 "usdt": usdt_amt,
                 "usdt_ratio": usdt_ratio,
+                "pool": pool_addr,
                 "token0": token0,
                 "token1": token1,
                 "symbol0": sym0,
@@ -672,7 +703,7 @@ def main() -> int:
     print(f"  tg_chat_id={chat_id}")
     print(f"  curve={CURVE_3POOL_SWAP}")
     print(f"  univ3_eth={UNIV3_ETH_USDC_USDT_POOL}")
-    print(f"  aerodrome={AERODROME_USDC_USDT_POOL} (base={'on' if providers.base else 'off'})")
+    print(f"  aerodrome_factory={AERODROME_FACTORY} (base={'on' if providers.base else 'off'})")
     print(f"  bsc=({'on' if providers.bsc else 'off'}) arb=({'on' if providers.arb else 'off'})")
     # Helpful for diagnosing RPC misconfiguration
     print(f"  eth_chain_id={getattr(providers, 'eth_chain_id', 'unknown')}")
