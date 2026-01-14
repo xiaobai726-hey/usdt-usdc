@@ -680,16 +680,20 @@ class SummaryPublisher:
         lines = [f"📊 USDT/USDC 链上监控（每小时汇总）", f"time={_utc_ts()}"]
         if curve:
             ratio_pct = (Decimal(str(curve.meta.get("usdt_ratio", 0))) * Decimal(100)).quantize(Decimal("0.01"))
+            inv = (Decimal(1) / curve.price_usdc_per_usdt) if curve.price_usdc_per_usdt else Decimal("0")
             lines.append(
-                f"Curve: px={curve.price_usdc_per_usdt.quantize(Decimal('0.00000001'))} USDC/USDT | USDT_Ratio={ratio_pct}%"
+                f"Curve: px={curve.price_usdc_per_usdt.quantize(Decimal('0.00000001'))} USDC/USDT "
+                f"(inv {inv.quantize(Decimal('0.00000001'))} USDT/USDC) | USDT_Ratio={ratio_pct}%"
             )
         else:
             lines.append("Curve: N/A")
 
         if uni:
             ratio_pct = (Decimal(str(uni.meta.get("usdt_ratio", 0))) * Decimal(100)).quantize(Decimal("0.01"))
+            inv = (Decimal(1) / uni.price_usdc_per_usdt) if uni.price_usdc_per_usdt else Decimal("0")
             lines.append(
-                f"UniswapV3: px={uni.price_usdc_per_usdt.quantize(Decimal('0.00000001'))} USDC/USDT | USDT_Ratio={ratio_pct}%"
+                f"UniswapV3: px={uni.price_usdc_per_usdt.quantize(Decimal('0.00000001'))} USDC/USDT "
+                f"(inv {inv.quantize(Decimal('0.00000001'))} USDT/USDC) | USDT_Ratio={ratio_pct}%"
             )
         else:
             lines.append("UniswapV3: N/A")
@@ -766,11 +770,12 @@ def main() -> int:
 
             for p in points:
                 px = p.price_usdc_per_usdt.quantize(Decimal("0.00000001"))
+                inv = (Decimal(1) / p.price_usdc_per_usdt).quantize(Decimal("0.00000001"))
                 extra = ""
                 if "usdt_ratio" in p.meta:
                     ratio_pct = (Decimal(str(p.meta["usdt_ratio"])) * Decimal(100)).quantize(Decimal("0.01"))
                     extra = f" | USDT_Ratio={ratio_pct}%"
-                print(f"[{p.chain}/{p.name}] price(USDC/USDT)={px}{extra}")
+                print(f"[{p.chain}/{p.name}] price(USDC/USDT)={px} | inv(USDT/USDC)={inv}{extra}")
 
             detector.evaluate_and_alert(points)
             summary.maybe_send(points)
