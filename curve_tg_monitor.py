@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as dt
+import json
 import os
 import sys
 import time
@@ -61,6 +62,7 @@ SIM_USDC_AMOUNT = Decimal("1000000")  # simulate 1,000,000 USDC -> USDT on Curve
 BPS_THRESHOLD = Decimal("3")  # 3 bps (arbitrage alert)
 DEFAULT_LOOP_SECONDS = 60
 DEFAULT_SUMMARY_SECONDS = 3600  # hourly summary push
+DEFAULT_SUMMARY_WINDOW_SECONDS = 300  # send within first 5 minutes of each hour
 
 CURVE_SWAP_ABI: list[dict[str, Any]] = [
     {
@@ -662,21 +664,21 @@ class ArbitrageDetector:
 
 
 class SummaryPublisher:
-    def __init__(self, notifier: TelegramNotifier, interval_seconds: int):
+    def __init__(self, notifier: TelegramNotifier, *, interval_seconds: int, window_seconds: int, state_path: str):
         self.notifier = notifier
-        self.interval_seconds = max(60, int(interval_seconds))
-        self._last_sent_bucket: int | None = None
-        self._last_attempt_ts: float = 0.0
-        self.retry_seconds = 300  # retry at most every 5 minutes if send fails
+        self.interval_seconds = max(3600, int(interval_seconds))
+        self.window_seconds = max(60, int(window_seconds))
+        self.state_path = state_path
+        self._last_sent_hour_start: int | None = self._load_state()
 
     def maybe_send(self, points: list[PricePoint], *, arb_threshold_bps: Decimal) -> None:
         now = time.time()
-        bucket = int(now // self.interval_seconds)
-        if self._last_sent_bucket == bucket:
+        hour_start = int(now // self.interval_seconds) * self.interval_seconds
+        # Only send near the top of the hour (first N seconds).
+        if (now - hour_start) > self.window_seconds:
             return
-        if self._last_attempt_ts and (now - self._last_attempt_ts) < self.retry_seconds:
+        if self._last_sent_hour_start == hour_start:
             return
-        self._last_attempt_ts = now
 
         # Expect Curve + Uniswap; send what we have.
         by_name = {f"{p.chain}/{p.name}": p for p in points}
@@ -717,12 +719,25 @@ class SummaryPublisher:
                     cheap_src, exp_src = "UniswapV3", "Curve"
                 lines.append(f"💡 最优路径提示：[{cheap_src}] 比 [{exp_src}] 便宜 {spread_bps}bps")
 
+        self.notifier.send("\n".join(lines))
+        self._last_sent_hour_start = hour_start
+        self._save_state(hour_start)
+
+    def _load_state(self) -> int | None:
         try:
-            self.notifier.send("\n".join(lines))
-            self._last_sent_bucket = bucket
+            with open(self.state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            v = data.get("last_sent_hour_start")
+            return int(v) if v is not None else None
+        except Exception:
+            return None
+
+    def _save_state(self, hour_start: int) -> None:
+        try:
+            with open(self.state_path, "w", encoding="utf-8") as f:
+                json.dump({"last_sent_hour_start": int(hour_start)}, f)
         except Exception as e:
-            # Don't spam; retry later.
-            print(f"Error sending hourly summary: {e}", file=sys.stderr)
+            print(f"Warning: failed to persist summary state: {e}", file=sys.stderr)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -735,6 +750,17 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_SUMMARY_SECONDS,
         help="Summary push interval seconds (default: 3600)",
+    )
+    p.add_argument(
+        "--summary-window-seconds",
+        type=int,
+        default=DEFAULT_SUMMARY_WINDOW_SECONDS,
+        help="Only send within first N seconds of each hour (default: 300)",
+    )
+    p.add_argument(
+        "--summary-state-path",
+        default="summary_state.json",
+        help="Persist last sent hour to avoid resends after restarts (default: summary_state.json)",
     )
     return p.parse_args()
 
@@ -753,7 +779,12 @@ def main() -> int:
 
     providers = Web3Providers(eth_rpc_url=eth_rpc, base_rpc_url=base_rpc, bsc_rpc_url=bsc_rpc, arb_rpc_url=arb_rpc)
     notifier = TelegramNotifier(bot_token=tg_token, chat_id=chat_id)
-    summary = SummaryPublisher(notifier=notifier, interval_seconds=args.summary_seconds)
+    summary = SummaryPublisher(
+        notifier=notifier,
+        interval_seconds=args.summary_seconds,
+        window_seconds=args.summary_window_seconds,
+        state_path=args.summary_state_path,
+    )
 
     monitors: list[PoolMonitor] = [
         Curve3PoolMonitor(providers.eth),
