@@ -666,19 +666,28 @@ class ArbitrageDetector:
 class SummaryPublisher:
     def __init__(self, notifier: TelegramNotifier, *, interval_seconds: int, window_seconds: int, state_path: str):
         self.notifier = notifier
+        # For "hourly" we align to local wall-clock hour boundaries.
         self.interval_seconds = max(3600, int(interval_seconds))
         self.window_seconds = max(60, int(window_seconds))
         self.state_path = state_path
         self._last_sent_hour_start: int | None = self._load_state()
+        self._last_attempt_ts: float = 0.0
+        self.retry_min_seconds = 60  # avoid tight retry loops on failures
 
     def maybe_send(self, points: list[PricePoint], *, arb_threshold_bps: Decimal) -> None:
         now = time.time()
-        hour_start = int(now // self.interval_seconds) * self.interval_seconds
+        # Local time hour boundary (not UTC): aligns with user's "整点".
+        local_now = dt.datetime.now().astimezone()
+        local_hour_start = local_now.replace(minute=0, second=0, microsecond=0)
+        hour_start = int(local_hour_start.timestamp())
         # Only send near the top of the hour (first N seconds).
         if (now - hour_start) > self.window_seconds:
             return
         if self._last_sent_hour_start == hour_start:
             return
+        if self._last_attempt_ts and (now - self._last_attempt_ts) < self.retry_min_seconds:
+            return
+        self._last_attempt_ts = now
 
         # Expect Curve + Uniswap; send what we have.
         by_name = {f"{p.chain}/{p.name}": p for p in points}
@@ -804,6 +813,7 @@ def main() -> int:
     print(f"  bsc=({'on' if providers.bsc else 'off'}) arb=({'on' if providers.arb else 'off'})")
     # Helpful for diagnosing RPC misconfiguration
     print(f"  eth_chain_id={getattr(providers, 'eth_chain_id', 'unknown')}")
+    print(f"  summary_window_seconds={args.summary_window_seconds} summary_state={args.summary_state_path}")
 
     while True:
         try:
