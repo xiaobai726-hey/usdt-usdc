@@ -629,7 +629,7 @@ class ArbitrageDetector:
         self.bps_threshold = bps_threshold
         self._last_key: str | None = None
         self._last_sent_ts: float = 0.0
-        self.cooldown_seconds = 300  # avoid spam
+        self.cooldown_seconds = 3600  # avoid spam (hourly)
 
     def evaluate_and_alert(self, points: list[PricePoint]) -> None:
         points = [p for p in points if p.price_usdc_per_usdt is not None and p.price_usdc_per_usdt > 0]
@@ -665,12 +665,18 @@ class SummaryPublisher:
     def __init__(self, notifier: TelegramNotifier, interval_seconds: int):
         self.notifier = notifier
         self.interval_seconds = max(60, int(interval_seconds))
-        self._last_sent_ts: float = 0.0
+        self._last_sent_bucket: int | None = None
+        self._last_attempt_ts: float = 0.0
+        self.retry_seconds = 300  # retry at most every 5 minutes if send fails
 
-    def maybe_send(self, points: list[PricePoint]) -> None:
+    def maybe_send(self, points: list[PricePoint], *, arb_threshold_bps: Decimal) -> None:
         now = time.time()
-        if self._last_sent_ts and (now - self._last_sent_ts) < self.interval_seconds:
+        bucket = int(now // self.interval_seconds)
+        if self._last_sent_bucket == bucket:
             return
+        if self._last_attempt_ts and (now - self._last_attempt_ts) < self.retry_seconds:
+            return
+        self._last_attempt_ts = now
 
         # Expect Curve + Uniswap; send what we have.
         by_name = {f"{p.chain}/{p.name}": p for p in points}
@@ -703,9 +709,20 @@ class SummaryPublisher:
             expensive = max(curve.price_usdc_per_usdt, uni.price_usdc_per_usdt)
             spread_bps = _bps_between(cheap, expensive).quantize(Decimal("0.1"))
             lines.append(f"Spread(Curve vs UniV3)={spread_bps}bps")
+            # Arbitrage hint (reported hourly together with summary)
+            if spread_bps >= arb_threshold_bps:
+                if curve.price_usdc_per_usdt <= uni.price_usdc_per_usdt:
+                    cheap_src, exp_src = "Curve", "UniswapV3"
+                else:
+                    cheap_src, exp_src = "UniswapV3", "Curve"
+                lines.append(f"💡 最优路径提示：[{cheap_src}] 比 [{exp_src}] 便宜 {spread_bps}bps")
 
-        self.notifier.send("\n".join(lines))
-        self._last_sent_ts = now
+        try:
+            self.notifier.send("\n".join(lines))
+            self._last_sent_bucket = bucket
+        except Exception as e:
+            # Don't spam; retry later.
+            print(f"Error sending hourly summary: {e}", file=sys.stderr)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -736,7 +753,6 @@ def main() -> int:
 
     providers = Web3Providers(eth_rpc_url=eth_rpc, base_rpc_url=base_rpc, bsc_rpc_url=bsc_rpc, arb_rpc_url=arb_rpc)
     notifier = TelegramNotifier(bot_token=tg_token, chat_id=chat_id)
-    detector = ArbitrageDetector(notifier=notifier, bps_threshold=Decimal(str(args.bps_threshold)))
     summary = SummaryPublisher(notifier=notifier, interval_seconds=args.summary_seconds)
 
     monitors: list[PoolMonitor] = [
@@ -777,8 +793,8 @@ def main() -> int:
                     extra = f" | USDT_Ratio={ratio_pct}%"
                 print(f"[{p.chain}/{p.name}] price(USDC/USDT)={px} | inv(USDT/USDC)={inv}{extra}")
 
-            detector.evaluate_and_alert(points)
-            summary.maybe_send(points)
+            # Hourly-only push: both monitoring summary and arbitrage hint are sent together.
+            summary.maybe_send(points, arb_threshold_bps=Decimal(str(args.bps_threshold)))
 
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
