@@ -62,7 +62,7 @@ SIM_USDC_AMOUNT = Decimal("1000000")  # simulate 1,000,000 USDC -> USDT on Curve
 BPS_THRESHOLD = Decimal("3")  # 3 bps (arbitrage alert)
 DEFAULT_LOOP_SECONDS = 60
 DEFAULT_SUMMARY_SECONDS = 3600  # hourly summary push
-DEFAULT_SUMMARY_WINDOW_SECONDS = 300  # send within first 5 minutes of each hour
+DEFAULT_SUMMARY_WINDOW_SECONDS = 0  # 0 = disable top-of-hour window; use strict interval
 
 CURVE_SWAP_ABI: list[dict[str, Any]] = [
     {
@@ -666,24 +666,29 @@ class ArbitrageDetector:
 class SummaryPublisher:
     def __init__(self, notifier: TelegramNotifier, *, interval_seconds: int, window_seconds: int, state_path: str):
         self.notifier = notifier
-        # For "hourly" we align to local wall-clock hour boundaries.
-        self.interval_seconds = max(3600, int(interval_seconds))
-        self.window_seconds = max(60, int(window_seconds))
+        self.interval_seconds = max(60, int(interval_seconds))
+        # If >0, only send within first N seconds of local hour.
+        self.window_seconds = max(0, int(window_seconds))
         self.state_path = state_path
-        self._last_sent_hour_start: int | None = self._load_state()
+        self._last_sent_ts: int | None = self._load_state()
         self._last_attempt_ts: float = 0.0
         self.retry_min_seconds = 60  # avoid tight retry loops on failures
 
     def maybe_send(self, points: list[PricePoint], *, arb_threshold_bps: Decimal) -> None:
         now = time.time()
-        # Local time hour boundary (not UTC): aligns with user's "整点".
-        local_now = dt.datetime.now().astimezone()
-        local_hour_start = local_now.replace(minute=0, second=0, microsecond=0)
-        hour_start = int(local_hour_start.timestamp())
-        # Only send near the top of the hour (first N seconds).
-        if (now - hour_start) > self.window_seconds:
-            return
-        if self._last_sent_hour_start == hour_start:
+        # Optional "top-of-hour" window.
+        if self.window_seconds > 0:
+            local_now = dt.datetime.now().astimezone()
+            local_hour_start = local_now.replace(minute=0, second=0, microsecond=0)
+            hour_start = int(local_hour_start.timestamp())
+            if (now - hour_start) > self.window_seconds:
+                return
+            # If we've already sent in this hour bucket, don't re-send.
+            if self._last_sent_ts is not None and int(self._last_sent_ts // 3600) == int(hour_start // 3600):
+                return
+
+        # Strict interval gating (default behavior).
+        if self._last_sent_ts is not None and (now - self._last_sent_ts) < self.interval_seconds:
             return
         if self._last_attempt_ts and (now - self._last_attempt_ts) < self.retry_min_seconds:
             return
@@ -729,22 +734,22 @@ class SummaryPublisher:
                 lines.append(f"💡 最优路径提示：[{cheap_src}] 比 [{exp_src}] 便宜 {spread_bps}bps")
 
         self.notifier.send("\n".join(lines))
-        self._last_sent_hour_start = hour_start
-        self._save_state(hour_start)
+        self._last_sent_ts = int(time.time())
+        self._save_state(self._last_sent_ts)
 
     def _load_state(self) -> int | None:
         try:
             with open(self.state_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            v = data.get("last_sent_hour_start")
+            v = data.get("last_sent_ts")
             return int(v) if v is not None else None
         except Exception:
             return None
 
-    def _save_state(self, hour_start: int) -> None:
+    def _save_state(self, last_sent_ts: int) -> None:
         try:
             with open(self.state_path, "w", encoding="utf-8") as f:
-                json.dump({"last_sent_hour_start": int(hour_start)}, f)
+                json.dump({"last_sent_ts": int(last_sent_ts)}, f)
         except Exception as e:
             print(f"Warning: failed to persist summary state: {e}", file=sys.stderr)
 
@@ -764,12 +769,12 @@ def _parse_args() -> argparse.Namespace:
         "--summary-window-seconds",
         type=int,
         default=DEFAULT_SUMMARY_WINDOW_SECONDS,
-        help="Only send within first N seconds of each hour (default: 300)",
+        help="If >0, only send within first N seconds of each local hour (default: 0=disabled)",
     )
     p.add_argument(
         "--summary-state-path",
         default="summary_state.json",
-        help="Persist last sent hour to avoid resends after restarts (default: summary_state.json)",
+        help="Persist last sent timestamp to avoid resends after restarts (default: summary_state.json)",
     )
     return p.parse_args()
 
@@ -813,7 +818,10 @@ def main() -> int:
     print(f"  bsc=({'on' if providers.bsc else 'off'}) arb=({'on' if providers.arb else 'off'})")
     # Helpful for diagnosing RPC misconfiguration
     print(f"  eth_chain_id={getattr(providers, 'eth_chain_id', 'unknown')}")
-    print(f"  summary_window_seconds={args.summary_window_seconds} summary_state={args.summary_state_path}")
+    print(
+        f"  summary_seconds={args.summary_seconds} summary_window_seconds={args.summary_window_seconds} "
+        f"summary_state={args.summary_state_path}"
+    )
 
     while True:
         try:
