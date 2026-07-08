@@ -27,53 +27,75 @@ def generate_daily_report():
     
     report = f"📊 <b>个人财务日报 ({today.strftime('%Y-%m-%d')})</b>\n\n"
     
-    for currency in ["HKD", "USDT"]:
-        # Get budget
-        budget = db.get_budget(current_month, currency)
+    # Exchange rate for combined view
+    USDT_TO_HKD = 7.8
+    
+    # Get transactions for current month
+    df = db.get_transactions_by_month(current_month)
+    
+    # HKD Stats
+    hkd_df = df[df['currency'] == 'HKD'] if not df.empty else pd.DataFrame()
+    hkd_income = hkd_df[hkd_df['type'] == 'income']['amount'].sum() if not hkd_df.empty else 0
+    hkd_expense = hkd_df[hkd_df['type'] == 'expense']['amount'].sum() if not hkd_df.empty else 0
+    
+    # USDT Stats
+    usdt_df = df[df['currency'] == 'USDT'] if not df.empty else pd.DataFrame()
+    usdt_income = usdt_df[usdt_df['type'] == 'income']['amount'].sum() if not usdt_df.empty else 0
+    usdt_expense = usdt_df[usdt_df['type'] == 'expense']['amount'].sum() if not usdt_df.empty else 0
+    
+    # Combined Expenses in HKD
+    total_expense_hkd = hkd_expense + (usdt_expense * USDT_TO_HKD)
+    
+    # Target Budget: 72,000 HKD (50k HKD + 22k HKD from USDT)
+    TARGET_BUDGET_HKD = 72000.0
+    remaining_budget_hkd = TARGET_BUDGET_HKD - total_expense_hkd
+    
+    # Calculate days remaining in month
+    import calendar
+    _, last_day = calendar.monthrange(today.year, today.month)
+    days_remaining = last_day - today.day + 1
+    
+    daily_allowance = remaining_budget_hkd / days_remaining if days_remaining > 0 else 0
+    
+    # Get today's transactions
+    today_str = today.strftime("%Y-%m-%d")
+    today_df = df[df['date'] == today_str] if not df.empty else pd.DataFrame()
+    today_hkd_expense = today_df[(today_df['currency'] == 'HKD') & (today_df['type'] == 'expense')]['amount'].sum() if not today_df.empty else 0
+    today_usdt_expense = today_df[(today_df['currency'] == 'USDT') & (today_df['type'] == 'expense')]['amount'].sum() if not today_df.empty else 0
+    today_total_expense_hkd = today_hkd_expense + (today_usdt_expense * USDT_TO_HKD)
+    
+    report += f"🎯 <b>本月总预算追踪 (目标: $72,000.00)</b>\n"
+    report += f"已支出总额: ${total_expense_hkd:,.2f}\n"
+    report += f"剩余总额度: ${remaining_budget_hkd:,.2f}\n"
+    
+    if remaining_budget_hkd > 0:
+        report += f"💡 建议每日最多可花: <b>${daily_allowance:,.2f}</b>\n"
+    else:
+        report += f"⚠️ <b>警告: 本月总支出已超预算！超额 ${abs(remaining_budget_hkd):,.2f}</b>\n"
         
-        # Get transactions for current month
-        df = db.get_transactions_by_month(current_month)
-        if not df.empty:
-            df = df[df['currency'] == currency]
+    report += f"\n📅 <b>今日动态</b>\n"
+    report += f"今日总支出: ${today_total_expense_hkd:,.2f}\n"
+    if today_total_expense_hkd > daily_allowance and remaining_budget_hkd > 0:
+        report += f"⚠️ 今日支出超过了建议的每日额度！\n"
+    elif remaining_budget_hkd > 0:
+        report += f"✅ 今日支出控制在合理范围内！\n"
         
-        income = df[df['type'] == 'income']['amount'].sum() if not df.empty else 0
-        expense = df[df['type'] == 'expense']['amount'].sum() if not df.empty else 0
-        
-        remaining_budget = budget['expense_budget'] - expense
-        
-        # Calculate days remaining in month
-        import calendar
-        _, last_day = calendar.monthrange(today.year, today.month)
-        days_remaining = last_day - today.day + 1
-        
-        daily_allowance = remaining_budget / days_remaining if days_remaining > 0 else 0
-        
-        # Get today's transactions
-        today_str = today.strftime("%Y-%m-%d")
-        today_df = df[df['date'] == today_str] if not df.empty else pd.DataFrame()
-        today_expense = today_df[today_df['type'] == 'expense']['amount'].sum() if not today_df.empty else 0
-        
-        prefix = "$" if currency == "HKD" else "₮"
-        
-        report += f"💵 <b>{currency} 账户概况</b>\n"
-        report += f"总收入: {prefix}{income:,.2f} (预算: {prefix}{budget['income_budget']:,.2f})\n"
-        report += f"总支出: {prefix}{expense:,.2f} (预算: {prefix}{budget['expense_budget']:,.2f})\n"
-        
-        report += f"剩余支出额度: {prefix}{remaining_budget:,.2f}\n"
-        
-        if remaining_budget > 0:
-            report += f"💡 建议每日最多可花: <b>{prefix}{daily_allowance:,.2f}</b>\n"
-        else:
-            report += f"⚠️ <b>警告: 本月支出已超预算！超额 {prefix}{abs(remaining_budget):,.2f}</b>\n"
-            
-        report += f"今日支出: {prefix}{today_expense:,.2f}\n"
-        if today_expense > daily_allowance and remaining_budget > 0:
-            report += f"⚠️ 今日支出超过了建议的每日额度！\n"
-        elif remaining_budget > 0:
-            report += f"✅ 今日支出控制在合理范围内！\n"
-        
-        report += "\n"
-        
+    report += f"\n💼 <b>各账户明细</b>\n"
+    report += f"<b>HKD 账户:</b>\n"
+    report += f"- 支出: ${hkd_expense:,.2f}\n"
+    report += f"- 收入: ${hkd_income:,.2f}\n"
+    report += f"<b>USDT 账户:</b>\n"
+    report += f"- 支出: ₮{usdt_expense:,.2f}\n"
+    report += f"- 收入: ₮{usdt_income:,.2f} (包含佣金)\n"
+    
+    # Calculate savings
+    # Total income minus total expenses
+    total_income_hkd = hkd_income + (usdt_income * USDT_TO_HKD)
+    total_savings_hkd = total_income_hkd - total_expense_hkd
+    
+    report += f"\n🏦 <b>本月储蓄概况</b>\n"
+    report += f"本月净结余 (折合HKD): ${total_savings_hkd:,.2f}\n"
+    
     return report
 
 def job():
