@@ -18,6 +18,7 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT NOT NULL,
         amount REAL NOT NULL,
+        currency TEXT NOT NULL DEFAULT 'HKD', -- 'HKD' or 'USDT'
         category TEXT,
         type TEXT NOT NULL, -- 'income' or 'expense'
         description TEXT,
@@ -30,43 +31,45 @@ def init_db():
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS budgets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        month TEXT NOT NULL UNIQUE, -- Format: YYYY-MM
+        month TEXT NOT NULL, -- Format: YYYY-MM
+        currency TEXT NOT NULL DEFAULT 'HKD', -- 'HKD' or 'USDT'
         income_budget REAL NOT NULL DEFAULT 0,
         expense_budget REAL NOT NULL DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(month, currency)
     )
     ''')
     
     conn.commit()
     conn.close()
 
-def add_transaction(date, amount, category, t_type, description, source):
+def add_transaction(date, amount, currency, category, t_type, description, source):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('''
-    INSERT INTO transactions (date, amount, category, type, description, source)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ''', (date, amount, category, t_type, description, source))
+    INSERT INTO transactions (date, amount, currency, category, type, description, source)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (date, amount, currency, category, t_type, description, source))
     conn.commit()
     conn.close()
 
-def set_budget(month, income_budget, expense_budget):
+def set_budget(month, currency, income_budget, expense_budget):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('''
-    INSERT INTO budgets (month, income_budget, expense_budget)
-    VALUES (?, ?, ?)
-    ON CONFLICT(month) DO UPDATE SET
+    INSERT INTO budgets (month, currency, income_budget, expense_budget)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(month, currency) DO UPDATE SET
         income_budget=excluded.income_budget,
         expense_budget=excluded.expense_budget
-    ''', (month, income_budget, expense_budget))
+    ''', (month, currency, income_budget, expense_budget))
     conn.commit()
     conn.close()
 
-def get_budget(month):
+def get_budget(month, currency='HKD'):
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT income_budget, expense_budget FROM budgets WHERE month = ?', (month,))
+    cursor.execute('SELECT income_budget, expense_budget FROM budgets WHERE month = ? AND currency = ?', (month, currency))
     result = cursor.fetchone()
     conn.close()
     if result:
