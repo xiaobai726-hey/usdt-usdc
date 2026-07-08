@@ -88,13 +88,13 @@ def show_dashboard():
         
         # HKD
         hkd_tx = year_tx[year_tx['currency'] == 'HKD']
-        hkd_income_yr = hkd_tx[hkd_tx['type'] == 'income']['amount'].sum() if not hkd_tx.empty else 0
-        hkd_expense_yr = hkd_tx[hkd_tx['type'] == 'expense']['amount'].sum() if not hkd_tx.empty else 0
+        hkd_income_yr = hkd_tx[(hkd_tx['type'] == 'income') & (hkd_tx['category'] != 'Credit Card Repayment')]['amount'].sum() if not hkd_tx.empty else 0
+        hkd_expense_yr = hkd_tx[(hkd_tx['type'] == 'expense') & (hkd_tx['category'] != 'Credit Card Repayment')]['amount'].sum() if not hkd_tx.empty else 0
         
         # USDT
         usdt_tx = year_tx[year_tx['currency'] == 'USDT']
-        usdt_income_yr = usdt_tx[usdt_tx['type'] == 'income']['amount'].sum() if not usdt_tx.empty else 0
-        usdt_expense_yr = usdt_tx[usdt_tx['type'] == 'expense']['amount'].sum() if not usdt_tx.empty else 0
+        usdt_income_yr = usdt_tx[(usdt_tx['type'] == 'income') & (usdt_tx['category'] != 'Credit Card Repayment')]['amount'].sum() if not usdt_tx.empty else 0
+        usdt_expense_yr = usdt_tx[(usdt_tx['type'] == 'expense') & (usdt_tx['category'] != 'Credit Card Repayment')]['amount'].sum() if not usdt_tx.empty else 0
         
         total_income_hkd_yr = hkd_income_yr + (usdt_income_yr * USDT_TO_HKD)
         total_expense_hkd_yr = hkd_expense_yr + (usdt_expense_yr * USDT_TO_HKD)

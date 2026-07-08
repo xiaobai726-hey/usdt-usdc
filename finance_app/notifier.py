@@ -39,12 +39,13 @@ def generate_daily_report():
     # HKD Stats
     hkd_df = df[df['currency'] == 'HKD'] if not df.empty else pd.DataFrame()
     hkd_income = hkd_df[hkd_df['type'] == 'income']['amount'].sum() if not hkd_df.empty else 0
-    hkd_expense = hkd_df[hkd_df['type'] == 'expense']['amount'].sum() if not hkd_df.empty else 0
+    # Exclude Credit Card Repayments from expense tracking so it doesn't double count or blow up the budget
+    hkd_expense = hkd_df[(hkd_df['type'] == 'expense') & (hkd_df['category'] != 'Credit Card Repayment')]['amount'].sum() if not hkd_df.empty else 0
     
     # USDT Stats
     usdt_df = df[df['currency'] == 'USDT'] if not df.empty else pd.DataFrame()
     usdt_income = usdt_df[usdt_df['type'] == 'income']['amount'].sum() if not usdt_df.empty else 0
-    usdt_expense = usdt_df[usdt_df['type'] == 'expense']['amount'].sum() if not usdt_df.empty else 0
+    usdt_expense = usdt_df[(usdt_df['type'] == 'expense') & (usdt_df['category'] != 'Credit Card Repayment')]['amount'].sum() if not usdt_df.empty else 0
     
     # Combined Expenses in HKD
     total_expense_hkd = hkd_expense + (usdt_expense * USDT_TO_HKD)
@@ -63,8 +64,8 @@ def generate_daily_report():
     # Get today's transactions
     today_str = today.strftime("%Y-%m-%d")
     today_df = df[df['date'] == today_str] if not df.empty else pd.DataFrame()
-    today_hkd_expense = today_df[(today_df['currency'] == 'HKD') & (today_df['type'] == 'expense')]['amount'].sum() if not today_df.empty else 0
-    today_usdt_expense = today_df[(today_df['currency'] == 'USDT') & (today_df['type'] == 'expense')]['amount'].sum() if not today_df.empty else 0
+    today_hkd_expense = today_df[(today_df['currency'] == 'HKD') & (today_df['type'] == 'expense') & (today_df['category'] != 'Credit Card Repayment')]['amount'].sum() if not today_df.empty else 0
+    today_usdt_expense = today_df[(today_df['currency'] == 'USDT') & (today_df['type'] == 'expense') & (today_df['category'] != 'Credit Card Repayment')]['amount'].sum() if not today_df.empty else 0
     today_total_expense_hkd = today_hkd_expense + (today_usdt_expense * USDT_TO_HKD)
     
     report += f"🎯 <b>本月总预算追踪 (目标: $72,000.00)</b>\n"
@@ -105,12 +106,14 @@ def generate_daily_report():
     
     if not year_tx.empty:
         hkd_tx = year_tx[year_tx['currency'] == 'HKD']
-        hkd_income_yr = hkd_tx[hkd_tx['type'] == 'income']['amount'].sum() if not hkd_tx.empty else 0
-        hkd_expense_yr = hkd_tx[hkd_tx['type'] == 'expense']['amount'].sum() if not hkd_tx.empty else 0
+        # For savings calculation, we also exclude Credit Card Repayments to avoid double counting
+        # since the actual expenses were already recorded when the credit card was swiped.
+        hkd_income_yr = hkd_tx[(hkd_tx['type'] == 'income') & (hkd_tx['category'] != 'Credit Card Repayment')]['amount'].sum() if not hkd_tx.empty else 0
+        hkd_expense_yr = hkd_tx[(hkd_tx['type'] == 'expense') & (hkd_tx['category'] != 'Credit Card Repayment')]['amount'].sum() if not hkd_tx.empty else 0
         
         usdt_tx = year_tx[year_tx['currency'] == 'USDT']
-        usdt_income_yr = usdt_tx[usdt_tx['type'] == 'income']['amount'].sum() if not usdt_tx.empty else 0
-        usdt_expense_yr = usdt_tx[usdt_tx['type'] == 'expense']['amount'].sum() if not usdt_tx.empty else 0
+        usdt_income_yr = usdt_tx[(usdt_tx['type'] == 'income') & (usdt_tx['category'] != 'Credit Card Repayment')]['amount'].sum() if not usdt_tx.empty else 0
+        usdt_expense_yr = usdt_tx[(usdt_tx['type'] == 'expense') & (usdt_tx['category'] != 'Credit Card Repayment')]['amount'].sum() if not usdt_tx.empty else 0
         
         total_income_hkd_yr = hkd_income_yr + (usdt_income_yr * USDT_TO_HKD)
         total_expense_hkd_yr = hkd_expense_yr + (usdt_expense_yr * USDT_TO_HKD)
