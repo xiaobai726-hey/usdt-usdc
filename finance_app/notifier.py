@@ -30,8 +30,11 @@ def generate_daily_report():
     # Exchange rate for combined view
     USDT_TO_HKD = 7.8
     
+    # Get all transactions for annual calculation
+    df_all = db.get_all_transactions()
+    
     # Get transactions for current month
-    df = db.get_transactions_by_month(current_month)
+    df = df_all[df_all['date'].str.startswith(current_month)] if not df_all.empty else pd.DataFrame()
     
     # HKD Stats
     hkd_df = df[df['currency'] == 'HKD'] if not df.empty else pd.DataFrame()
@@ -95,6 +98,37 @@ def generate_daily_report():
     
     report += f"\n🏦 <b>本月储蓄概况</b>\n"
     report += f"本月净结余 (折合HKD): ${total_savings_hkd:,.2f}\n"
+    
+    # Calculate Annual Savings Goal
+    current_year = today.strftime("%Y")
+    year_tx = df_all[df_all['date'].str.startswith(current_year)] if not df_all.empty else pd.DataFrame()
+    
+    if not year_tx.empty:
+        hkd_tx = year_tx[year_tx['currency'] == 'HKD']
+        hkd_income_yr = hkd_tx[hkd_tx['type'] == 'income']['amount'].sum() if not hkd_tx.empty else 0
+        hkd_expense_yr = hkd_tx[hkd_tx['type'] == 'expense']['amount'].sum() if not hkd_tx.empty else 0
+        
+        usdt_tx = year_tx[year_tx['currency'] == 'USDT']
+        usdt_income_yr = usdt_tx[usdt_tx['type'] == 'income']['amount'].sum() if not usdt_tx.empty else 0
+        usdt_expense_yr = usdt_tx[usdt_tx['type'] == 'expense']['amount'].sum() if not usdt_tx.empty else 0
+        
+        total_income_hkd_yr = hkd_income_yr + (usdt_income_yr * USDT_TO_HKD)
+        total_expense_hkd_yr = hkd_expense_yr + (usdt_expense_yr * USDT_TO_HKD)
+        
+        current_savings_yr = total_income_hkd_yr - total_expense_hkd_yr
+    else:
+        current_savings_yr = 0
+        
+    GOAL = 1000000.0
+    progress = (current_savings_yr / GOAL) * 100
+    
+    report += f"\n🏆 <b>年度储蓄目标 (100万 HKD)</b>\n"
+    report += f"当前已存: ${current_savings_yr:,.2f}\n"
+    report += f"目标进度: {progress:.1f}%\n"
+    if current_savings_yr < GOAL:
+        report += f"距离目标还差: ${(GOAL - current_savings_yr):,.2f}\n"
+    else:
+        report += f"🎉 恭喜！已达成年度储蓄目标！\n"
     
     return report
 

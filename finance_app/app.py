@@ -74,6 +74,46 @@ def show_dashboard():
     
     st.divider()
     
+    # --- Annual Savings Goal ---
+    st.subheader("🎯 2026 年度储蓄目标追踪")
+    
+    # Calculate total savings for the year across all currencies (converted to HKD)
+    USDT_TO_HKD = 7.8
+    all_tx = db.get_all_transactions()
+    
+    if not all_tx.empty:
+        # Filter for current year
+        current_year = today.strftime("%Y")
+        year_tx = all_tx[all_tx['date'].str.startswith(current_year)]
+        
+        # HKD
+        hkd_tx = year_tx[year_tx['currency'] == 'HKD']
+        hkd_income_yr = hkd_tx[hkd_tx['type'] == 'income']['amount'].sum() if not hkd_tx.empty else 0
+        hkd_expense_yr = hkd_tx[hkd_tx['type'] == 'expense']['amount'].sum() if not hkd_tx.empty else 0
+        
+        # USDT
+        usdt_tx = year_tx[year_tx['currency'] == 'USDT']
+        usdt_income_yr = usdt_tx[usdt_tx['type'] == 'income']['amount'].sum() if not usdt_tx.empty else 0
+        usdt_expense_yr = usdt_tx[usdt_tx['type'] == 'expense']['amount'].sum() if not usdt_tx.empty else 0
+        
+        total_income_hkd_yr = hkd_income_yr + (usdt_income_yr * USDT_TO_HKD)
+        total_expense_hkd_yr = hkd_expense_yr + (usdt_expense_yr * USDT_TO_HKD)
+        
+        current_savings = total_income_hkd_yr - total_expense_hkd_yr
+    else:
+        current_savings = 0
+        
+    GOAL = 1000000.0 # 1 Million HKD
+    progress = max(0, min(current_savings / GOAL, 1.0))
+    
+    col_g1, col_g2 = st.columns([3, 1])
+    with col_g1:
+        st.progress(progress, text=f"目标进度: {progress*100:.1f}%")
+    with col_g2:
+        st.metric("当前已存 (折合HKD)", f"${current_savings:,.2f}", f"距离目标还差: ${(GOAL - current_savings):,.2f}" if current_savings < GOAL else "🎉 目标达成！")
+        
+    st.divider()
+    
     if not df.empty:
         col1, col2 = st.columns(2)
         
