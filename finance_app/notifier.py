@@ -3,6 +3,7 @@ import time
 import datetime
 import schedule
 import requests
+import pandas as pd
 from dotenv import load_dotenv
 import database as db
 
